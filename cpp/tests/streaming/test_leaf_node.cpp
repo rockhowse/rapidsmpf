@@ -78,10 +78,7 @@ Node shutdown(
     std::shared_ptr<Context> ctx, std::shared_ptr<Channel> ch, std::vector<Node>&& tasks
 ) {
     ShutdownAtExit c{ch};
-    auto results = co_await coro::when_all(std::move(tasks));
-    for (auto& r : results) {
-        r.return_value();
-    }
+    co_await when_all_or_throw(std::move(tasks));
     co_await ch->drain(ctx->executor());
 }
 

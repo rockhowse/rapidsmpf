@@ -7,13 +7,17 @@
 
 namespace rapidsmpf::streaming {
 
-void run_streaming_pipeline(std::vector<Node> nodes) {
-    auto results = coro::sync_wait(coro::when_all(std::move(nodes)));
+Node when_all_or_throw(std::vector<Node>&& nodes) {
+    auto results = co_await coro::when_all(std::move(nodes));
+    // The node result itself is always `void` but we access it here to re-throw
+    // possible unhandled exceptions.
     for (auto& result : results) {
-        // The node result itself is always `void` but we access it here to re-throw
-        // possible unhandled exceptions.
         result.return_value();
     }
+}
+
+void run_streaming_pipeline(std::vector<Node> nodes) {
+    coro::sync_wait(when_all_or_throw(std::move(nodes)));
 }
 
 }  // namespace rapidsmpf::streaming
