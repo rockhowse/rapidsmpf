@@ -100,3 +100,16 @@ def test_read_parquet(
         plc.DataType(plc.TypeId.BOOL8),
     )
     assert all_equal.to_py()
+
+
+@pytest.mark.parametrize("num_tickets", [-1, 0])
+def test_read_parquet_non_positive_throttle_throws(
+    context: Context, source: plc.io.SourceInfo, num_tickets: int
+) -> None:
+    ch = Channel[TableChunk]()
+    options = plc.io.parquet.ParquetReaderOptions.builder(source).build()
+
+    producer = read_parquet(context, ch, num_tickets, options, 100)
+
+    with pytest.raises(RuntimeError):
+        run_streaming_pipeline(nodes=[producer])
