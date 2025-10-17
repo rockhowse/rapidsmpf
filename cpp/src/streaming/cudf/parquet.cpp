@@ -97,6 +97,7 @@ Node read_parquet(
         "Skipping rows not yet supported in multi-rank execution"
     );
     auto files = source.filepaths();
+    RAPIDSMPF_EXPECTS(files.size() > 0, "Must have at least one file to read");
     RAPIDSMPF_EXPECTS(
         files.size() < std::numeric_limits<int>::max(), "Trying to read too many files"
     );
@@ -107,7 +108,7 @@ Node read_parquet(
         file_offset +=
             static_cast<int>(files.size() / size + (i < (files.size() % size)));
     }
-    files = std::vector(
+    auto local_files = std::vector(
         files.begin() + file_offset, files.begin() + file_offset + files_per_rank
     );
     int files_per_split = 1;
@@ -117,7 +118,7 @@ Node read_parquet(
     // up producing many small chunks.
     if (files_per_rank > 1) {
         // Figure out a guesstimated splitting.
-        auto source = cudf::io::source_info(files[0]);
+        auto source = cudf::io::source_info(local_files[0]);
         auto metadata = cudf::io::read_parquet_metadata(source);
         auto const rg = metadata.rowgroup_metadata();
         auto const num_rows = metadata.num_rows();
@@ -129,6 +130,24 @@ Node read_parquet(
     auto options_num_rows =
         options.get_num_rows().value_or(std::numeric_limits<int64_t>::max());
     std::uint64_t sequence_number = 0;
+    if (options_num_rows == 0) {
+        if (rank == 0) {
+            // Rank zero sends empty table of the correct shape/schema. Everyone else
+            // sends nothing.
+            cudf::io::parquet_reader_options empty_opts{options};
+            cudf::io::source_info source{files[0]};
+            co_await ctx->executor()->schedule(read_parquet_chunk(
+                ctx,
+                throttle,
+                ctx->br()->stream_pool().get_stream(),
+                std::move(empty_opts),
+                0
+            ));
+        }
+        co_await ch_out->drain(ctx->executor());
+        co_return;
+    }
+    bool skipped_all{true};
     for (file_offset = 0; file_offset < files_per_rank; file_offset += files_per_split) {
         if (options_num_rows == 0) {
             break;
@@ -137,8 +156,8 @@ Node read_parquet(
         std::vector<std::string> chunk;
         chunk.reserve(static_cast<std::size_t>(nfiles));
         std::ranges::move(
-            files.begin() + file_offset,
-            files.begin() + file_offset + nfiles,
+            local_files.begin() + file_offset,
+            local_files.begin() + file_offset + nfiles,
             std::back_inserter(chunk)
         );
         auto source = cudf::io::source_info(std::move(chunk));
@@ -147,6 +166,7 @@ Node read_parquet(
         auto skip_rows = options_skip_rows;
         options_skip_rows = std::max(0L, options_skip_rows - source_num_rows);
         while (skip_rows < source_num_rows && options_num_rows > 0) {
+            skipped_all = false;
             cudf::size_type num_rows = std::min(
                 {static_cast<std::int64_t>(num_rows_per_chunk),
                  source_num_rows - skip_rows,
@@ -167,6 +187,26 @@ Node read_parquet(
                 sequence_number++
             )));
             skip_rows += num_rows;
+        }
+    }
+    if (skipped_all) {
+        RAPIDSMPF_EXPECTS(
+            read_tasks.size() == 0, "Skipped everything but read tasks exist"
+        );
+        if (rank == size - 1) {
+            // If we skipped everything in the file and we are the last rank send an empty
+            // table of the correct shape/schema. Everyone else sends nothing.
+            // If we're the last rank and we skipped everything it must also be the case
+            // that previous ranks skipped everything.
+            cudf::io::parquet_reader_options empty_opts{options};
+            cudf::io::source_info source{files[0]};
+            co_await ctx->executor()->schedule(read_parquet_chunk(
+                ctx,
+                throttle,
+                ctx->br()->stream_pool().get_stream(),
+                std::move(empty_opts),
+                0
+            ));
         }
     }
     co_await when_all_or_throw(std::move(read_tasks));
