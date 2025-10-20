@@ -29,11 +29,7 @@ namespace {
  * @param ctx The execution context to use.
  * @param ch_out Channel to which `TableChunk`s are sent.
  * @param stream The stream on which to read the chunk.
- * @param source The `cudf::io::source_info` describing the data to read.
- * @param columns Named columns to read from the file.
- * @param skip_rows Number of rows to skip from the beginning of the file.
- * @param num_rows Number of rows to read.
- * @param predicate Optional predicate to apply during the read.
+ * @param options The parquet reader options describing the data to read.
  * @param sequence_number The ordered chunk id to reconstruct original ordering of the
  * data.
  *
