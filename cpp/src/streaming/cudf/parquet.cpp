@@ -64,7 +64,6 @@ Node read_parquet_chunk(
     co_await ctx->executor()->yield();
     co_await receipt;
 }
-
 }  // namespace
 
 Node read_parquet(
@@ -101,82 +100,49 @@ Node read_parquet(
     RAPIDSMPF_EXPECTS(
         files.size() < std::numeric_limits<int>::max(), "Trying to read too many files"
     );
+    // TODO: Handle case where multiple ranks are reading from a single file.
     int files_per_rank =
         static_cast<int>(files.size() / size + (rank < (files.size() % size)));
-    int file_offset = 0;
-    for (auto i = std::size_t{0}; i < rank; i++) {
-        file_offset +=
-            static_cast<int>(files.size() / size + (i < (files.size() % size)));
-    }
+    int file_offset = rank * (files.size() / size) + std::min(rank, files.size() % size);
     auto local_files = std::vector(
         files.begin() + file_offset, files.begin() + file_offset + files_per_rank
     );
-    int files_per_split = 1;
-    // TODO: Handle case where multiple ranks are reading from a single file.
-    // TODO: We could be smarter here, suppose that the number of files we end up wanting
-    // is one, but each file is marginally larger than our target_rows_per_chunk, we'd end
-    // up producing many small chunks.
-    if (files_per_rank > 1) {
-        // Figure out a guesstimated splitting.
-        auto source = cudf::io::source_info(local_files[0]);
-        auto metadata = cudf::io::read_parquet_metadata(source);
-        auto const rg = metadata.rowgroup_metadata();
-        auto const num_rows = metadata.num_rows();
-        files_per_split =
-            std::max(static_cast<int>(num_rows_per_chunk / num_rows), files_per_split);
-    }
-    std::vector<Node> read_tasks;
-    auto options_skip_rows = options.get_skip_rows();
-    auto options_num_rows =
+    cudf::io::parquet_reader_options local_options{options};
+    local_options.set_source(cudf::io::source_info(local_files));
+    auto metadata = cudf::io::read_parquet_metadata(local_options.get_source());
+    auto const local_num_rows = metadata.num_rows();
+    auto skip_rows = options.get_skip_rows();
+    auto num_rows_to_read =
         options.get_num_rows().value_or(std::numeric_limits<int64_t>::max());
-    std::uint64_t sequence_number = 0;
-    if (options_num_rows == 0) {
-        if (rank == 0) {
-            // Rank zero sends empty table of the correct shape/schema. Everyone else
-            // sends nothing.
-            cudf::io::parquet_reader_options empty_opts{options};
-            cudf::io::source_info source{files[0]};
-            co_await ctx->executor()->schedule(read_parquet_chunk(
-                ctx,
-                throttle,
-                ctx->br()->stream_pool().get_stream(),
-                std::move(empty_opts),
-                0
-            ));
-        }
-        co_await ch_out->drain(ctx->executor());
-        co_return;
-    }
-    bool skipped_all{true};
-    for (file_offset = 0; file_offset < files_per_rank; file_offset += files_per_split) {
-        if (options_num_rows == 0) {
-            break;
-        }
-        auto nfiles = std::min(files_per_split, files_per_rank - file_offset);
-        std::vector<std::string> chunk;
-        chunk.reserve(static_cast<std::size_t>(nfiles));
-        std::ranges::move(
-            local_files.begin() + file_offset,
-            local_files.begin() + file_offset + nfiles,
-            std::back_inserter(chunk)
-        );
-        auto source = cudf::io::source_info(std::move(chunk));
-        auto metadata = cudf::io::read_parquet_metadata(source);
-        auto const source_num_rows = metadata.num_rows();
-        auto skip_rows = options_skip_rows;
-        options_skip_rows = std::max(0L, options_skip_rows - source_num_rows);
-        while (skip_rows < source_num_rows && options_num_rows > 0) {
-            skipped_all = false;
-            cudf::size_type num_rows = std::min(
+    if ((num_rows_to_read == 0 && rank == 0)
+        || (skip_rows >= local_num_rows && rank == size - 1))
+    {
+        // If we're reading nothing, rank zero sends an empty table of correct
+        // shape/schema and everyone else sends nothing. Similarly, if we skipped
+        // everything in the file and we're the last rank, send an empty table, otherwise
+        // send nothing.
+        cudf::io::parquet_reader_options empty_opts{options};
+        empty_opts.set_source(cudf::io::source_info{options.get_source().filepaths()[0]});
+        empty_opts.set_skip_rows(0);
+        empty_opts.set_num_rows(0);
+        co_await ctx->executor()->schedule(read_parquet_chunk(
+            ctx, throttle, ctx->br()->stream_pool().get_stream(), std::move(empty_opts), 0
+        ));
+    } else {
+        std::uint64_t sequence_number = 0;
+        std::vector<Node> read_tasks;
+        while (skip_rows < local_num_rows && num_rows_to_read > 0) {
+            cudf::size_type chunk_num_rows = std::min(
                 {static_cast<std::int64_t>(num_rows_per_chunk),
-                 source_num_rows - skip_rows,
-                 options_num_rows}
+                 local_num_rows - skip_rows,
+                 num_rows_to_read}
             );
-            options_num_rows = std::max(0L, options_num_rows - num_rows);
-            cudf::io::parquet_reader_options chunk_options{options};
-            chunk_options.set_source(source);
+            num_rows_to_read -= chunk_num_rows;
+            cudf::io::parquet_reader_options chunk_options{local_options};
             chunk_options.set_skip_rows(skip_rows);
-            chunk_options.set_num_rows(num_rows);
+            chunk_options.set_num_rows(chunk_num_rows);
+            // TODO: This reads the metadata ntasks times.
+            // See https://github.com/rapidsai/cudf/issues/20311
             read_tasks.push_back(ctx->executor()->schedule(read_parquet_chunk(
                 ctx,
                 throttle,
@@ -186,30 +152,10 @@ Node read_parquet(
                 // sending only one chunk.
                 sequence_number++
             )));
-            skip_rows += num_rows;
+            skip_rows += chunk_num_rows;
         }
+        co_await when_all_or_throw(std::move(read_tasks));
     }
-    if (skipped_all) {
-        RAPIDSMPF_EXPECTS(
-            read_tasks.size() == 0, "Skipped everything but read tasks exist"
-        );
-        if (rank == size - 1) {
-            // If we skipped everything in the file and we are the last rank send an empty
-            // table of the correct shape/schema. Everyone else sends nothing.
-            // If we're the last rank and we skipped everything it must also be the case
-            // that previous ranks skipped everything.
-            cudf::io::parquet_reader_options empty_opts{options};
-            cudf::io::source_info source{files[0]};
-            co_await ctx->executor()->schedule(read_parquet_chunk(
-                ctx,
-                throttle,
-                ctx->br()->stream_pool().get_stream(),
-                std::move(empty_opts),
-                0
-            ));
-        }
-    }
-    co_await when_all_or_throw(std::move(read_tasks));
     co_await ch_out->drain(ctx->executor());
 }
 }  // namespace rapidsmpf::streaming::node
