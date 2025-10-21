@@ -9,6 +9,7 @@
 namespace rapidsmpf::streaming {
 
 void run_streaming_pipeline(std::vector<Node> nodes) {
+    // std::cout << "run_streaming_pipeline() - nodes: " << nodes.size() << std::endl;
     auto results = coro::sync_wait(coro::when_all(std::move(nodes)));
     for (auto& result : results) {
         // The node result itself is always `void` but we access it here to re-throw

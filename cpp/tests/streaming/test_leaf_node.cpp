@@ -33,6 +33,7 @@ using StreamingLeafTasks = BaseStreamingFixture;
 TEST_F(StreamingLeafTasks, PushAndPullChunks) {
     constexpr int num_rows = 100;
     constexpr int num_chunks = 10;
+    // std::cout << "PushAndPullChunks()" << std::endl;
 
     std::vector<cudf::table> expects;
     for (int i = 0; i < num_chunks; ++i) {
@@ -67,9 +68,9 @@ TEST_F(StreamingLeafTasks, PushAndPullChunks) {
 
     EXPECT_EQ(expects.size(), outputs.size());
     for (std::size_t i = 0; i < expects.size(); ++i) {
-        EXPECT_EQ(outputs[i].get<TableChunk>().sequence_number(), i);
+        EXPECT_EQ(outputs[i].get1<TableChunk>().sequence_number(), i);
         CUDF_TEST_EXPECT_TABLES_EQUIVALENT(
-            outputs[i].get<TableChunk>().table_view(), expects[i].view()
+            outputs[i].get1<TableChunk>().table_view(), expects[i].view()
         );
     }
 }

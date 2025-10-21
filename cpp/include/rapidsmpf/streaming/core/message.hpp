@@ -6,6 +6,7 @@
 #pragma once
 
 #include <any>
+#include <iostream>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -66,17 +67,29 @@ class Message {
      */
     template <typename T>
     Message(std::unique_ptr<T> payload) {
+        // std::cout << "Message(): ctor payload" << std::endl;
         RAPIDSMPF_EXPECTS(
             payload != nullptr, "payload cannot be null", std::invalid_argument
         );
-        payload_ = std::make_shared<Payload>(std::shared_ptr<T>(std::move(payload)));
+        payload_ = std::make_unique<Payload>(std::shared_ptr<T>(std::move(payload)));
     }
 
     /** @brief Move construct. @param other Source message. */
-    Message(Message&& other) noexcept = default;
+    // Message(Message&& other) noexcept = default;
+    Message(Message&& other) noexcept : payload_{std::move(other.payload_)} {
+        // std::cout << "Message(): move1" << std::endl;
+    }
 
     /** @brief Move assign. @param other Source message. @return *this. */
-    Message& operator=(Message&& other) noexcept = default;
+    // Message& operator=(Message&& other) noexcept = default;
+    Message& operator=(Message&& other) noexcept {
+        // std::cout << "Message(): move2" << std::endl;
+        payload_ = std::move(other.payload_);
+        return *this;
+    }
+
+    Message(Message&) = delete;
+    Message& operator=(Message const&) = delete;
 
     /**
      * @brief Resets the message to an empty state.
@@ -87,7 +100,8 @@ class Message {
      * @note After this call, the message becomes empty.
      */
     void reset() noexcept {
-        return payload_.reset();
+        // std::cout << "Message()::reset()" << std::endl;
+        payload_.reset();
     }
 
     /**
@@ -96,6 +110,7 @@ class Message {
      * @return `true` if the message is empty; otherwise, `false`.
      */
     [[nodiscard]] bool empty() const noexcept {
+        // std::cout << "Message()::empty()" << std::endl;
         if (payload_) {
             std::lock_guard<std::mutex> lock(payload_->mutex);
             return !payload_->data.has_value();
@@ -112,6 +127,7 @@ class Message {
      */
     template <typename T>
     [[nodiscard]] bool holds() const {
+        // std::cout << "Message()::holds()" << std::endl;
         auto lock = lock_payload();
         return payload_->data.type() == typeid(std::shared_ptr<T>);
     }
@@ -127,7 +143,8 @@ class Message {
      * @throws std::invalid_argument if the message is empty or the type mismatches.
      */
     template <typename T>
-    T const& get() const {
+    T const& get1() const {
+        // std::cout << "Message()::get1()" << std::endl;
         auto [ret, lock] = get_ptr_and_lock<T>();
         return *ret;
     }
@@ -150,37 +167,37 @@ class Message {
      */
     template <typename T>
     T release() {
-        // If this is the last reference, `reset()` deallocates `payload_` thus
-        // we have to move the payload to a new shared_ptr before resetting.
+        // std::cout << "Message()::release()" << std::endl;
+        //  If this is the last reference, `reset()` deallocates `payload_` thus
+        //  we have to move the payload to a new shared_ptr before resetting.
         auto ret = [&]() -> std::shared_ptr<T> {
             auto [ptr, lock] = get_ptr_and_lock<T>();
-            RAPIDSMPF_EXPECTS(
-                payload_.use_count() == 1,
-                "release() requires this to be the sole owner of the payload",
-                std::invalid_argument
-            );
-            return std::move(ptr);
+            // RAPIDSMPF_EXPECTS(
+            //     payload_.use_count() == 1,
+            //     "release() requires this to be the sole owner of the payload",
+            //     std::invalid_argument
+            // );
+            return ptr;
         }();
         reset();
         return std::move(*ret);
     }
 
-    /**
-     * @brief Create a shallow copy that shares the payload.
-     *
-     * Produces another handle to the same underlying payload; no data is copied.
-     *
-     * @return A new message that shares the payload with this message.
-     */
-    [[nodiscard]] Message shallow_copy() const {
-        auto lock = lock_payload();
-        return *this;
-    }
+    // /**
+    //  * @brief Create a shallow copy that shares the payload.
+    //  *
+    //  * Produces another handle to the same underlying payload; no data is copied.
+    //  *
+    //  * @return A new message that shares the payload with this message.
+    //  */
+    // [[nodiscard]] Message shallow_copy() const {
+    //     auto lock = lock_payload();
+    //     return *this;
+    // }
 
   private:
     // Copying is private to force explicit sharing via shallow_copy().
-    Message(Message const&) = default;
-    Message& operator=(Message const&) = default;
+
 
     /**
      * @brief Lock and validate the internal payload.
@@ -189,6 +206,7 @@ class Message {
      * @throws std::invalid_argument if the message is empty.
      */
     [[nodiscard]] std::unique_lock<std::mutex> lock_payload() const {
+        // std::cout << "Message()::lock_payload()" << std::endl;
         if (payload_) {
             std::unique_lock<std::mutex> lock(payload_->mutex);
             if (payload_->data.has_value()) {
@@ -208,6 +226,7 @@ class Message {
     template <typename T>
     [[nodiscard]] std::pair<std::shared_ptr<T>, std::unique_lock<std::mutex>>
     get_ptr_and_lock() const {
+        // std::cout << "Message()::get_ptr_and_lock()" << std::endl;
         RAPIDSMPF_EXPECTS(holds<T>(), "wrong message type", std::invalid_argument);
         auto lock = lock_payload();
         return std::make_pair(
@@ -216,7 +235,7 @@ class Message {
     }
 
   private:
-    std::shared_ptr<Payload> payload_;
+    std::unique_ptr<Payload> payload_;
 };
 
 }  // namespace rapidsmpf::streaming
